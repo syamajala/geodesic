@@ -3,6 +3,7 @@ os.environ['ETS_TOOLKIT'] = 'qt4'
 os.environ['QT_API'] = 'pyqt'
 import numpy as np
 import sympy as sp
+import networkx as nx
 import itertools as it
 from pyface.qt import QtGui, QtCore
 from traits.api import HasTraits, Instance, on_trait_change
@@ -13,6 +14,7 @@ from mayavi.core.ui.api import MayaviScene, MlabSceneModel, \
 pi = np.pi
 N = 50
 eps = 1/N
+BLACK = (0, 0, 0)
 
 
 class Visualization(HasTraits):
@@ -42,6 +44,8 @@ class Visualization(HasTraits):
         self.G.simplify()
         self.Ginv = self.G.inv()
 
+        # self.imesh = InducedMesh(10, self.f)
+
     def christoffel(self, k):
         return sp.Matrix([[self.christoffel_ijk(0, 0, k), self.christoffel_ijk(0, 1, k)],
                           [self.christoffel_ijk(1, 0, k), self.christoffel_ijk(1, 1, k)]])
@@ -59,7 +63,7 @@ class Visualization(HasTraits):
 
     def curve(self, l):
         """Given a plane curve l, find the surface curve"""
-        return [self.f(*i) for i in l]
+        return [self.f(i[0], i[1]) for i in l]
 
     def y_pk(self, p, k, x):
         k = k - 1
@@ -96,25 +100,52 @@ class Visualization(HasTraits):
             print "adding point",
             self.plane_points.append(point)
             self.scene.mlab.points3d(*point, scale_factor=0.1)
+            self.scene.mlab.text3d(*point, scale=0.2, color=BLACK,
+                                   text=str(len(self.plane_points)))
+
             added = True
         else:
             print "plane already contains point",
 
         print point
 
+        l = None
+
         if len(self.plane_points) >= 2 and added:
             start = self.plane_points[-2]
-            x = [start[0], point[0]]
-            y = [start[1], point[1]]
-            z = [start[2], point[2]]
+            l = self.plane.line(start, point)
+            x = []
+            y = []
+            z = []
+            for i in l:
+                x.append(i[0])
+                y.append(i[1])
+                z.append(i[2])
+
             self.scene.mlab.plot3d(x, y, z, tube_radius=0.01)
 
         if added:
             self.scene.mlab.figure(self.figure)
             spoint = self.surf.f(point[0], point[1])[0]
             self.surf_points.append(spoint)
-            self.scene.mlab.points3d(*spoint,
-                                     scale_factor=0.1)
+            self.scene.mlab.points3d(*spoint, scale_factor=0.1)
+            self.scene.mlab.text3d(*spoint, scale=0.2, color=BLACK,
+                                   text=str(len(self.surf_points)))
+
+            if l is not None:
+                c = self.curve(l)
+
+                x = []
+                y = []
+                z = []
+                for i in c:
+                    j = i[0]
+                    x.append(j[0])
+                    y.append(j[1])
+                    z.append(j[2])
+
+                self.scene.mlab.plot3d(x, y, z, tube_radius=0.01, color=BLACK)
+
             self.scene.mlab.figure(self.figure2)
 
 
@@ -147,7 +178,20 @@ class Plane():
         p_ = np.array(p)
         q_ = np.array(q)
 
-        return np.array([p + i*(q-p) for i in t])
+        return np.array([p_ + i*(q_-p_) for i in t])
+
+
+class InducedMesh():
+
+    def __init__(self, size, f):
+        self.size = size
+        self.f = f
+
+        self.x, self.y = np.mgrid[0:1:1j*self.size, 0:1:1j*self.size]
+        self.w = self.f(self.x, self.y)[0]
+
+        self.graph = nx.Graph()
+        self.graph.add_nodes_from(range(0, self.size**2))
 
 
 class Sphere(Visualization):
@@ -208,8 +252,8 @@ if __name__ == "__main__":
     container = QtGui.QWidget()
     container.setWindowTitle("Embedding Mayavi in a PyQt4 Application")
     layout = QtGui.QGridLayout(container)
-    s = Sphere(1)
-#    s = Torus(3, 2)
+#    s = Sphere(1)
+    s = Torus(3, 2)
     mayavi_widget = MayaviQWidget(s, container)
     layout.addWidget(mayavi_widget, 1, 1)
     label = QtGui.QLabel(container)
