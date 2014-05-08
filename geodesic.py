@@ -3,6 +3,7 @@ os.environ['ETS_TOOLKIT'] = 'qt4'
 os.environ['QT_API'] = 'pyqt'
 import numpy as np
 import sympy as sp
+import itertools as it
 from pyface.qt import QtGui, QtCore
 from traits.api import HasTraits, Instance, on_trait_change
 from traitsui.api import View, Item
@@ -10,6 +11,8 @@ from mayavi.core.ui.api import MayaviScene, MlabSceneModel, \
     SceneEditor
 
 pi = np.pi
+N = 50
+eps = 1/N
 
 
 class Visualization(HasTraits):
@@ -24,17 +27,60 @@ class Visualization(HasTraits):
 
         self.surf = surf
         self.plane = surf.plane
+
+        self.f = sp.lambdify(self.surf.pvars, self.surf.parameterization,
+                             [{'ImmutableMatrix': np.array}, "numpy"])
+
         self.figure = self.scene.mlab.gcf()
         self.figure2 = self.scene.mlab.figure(2)
 
         self.plane_points = []
         self.surf_points = []
 
-    def plane(self, x, y):
-        return np.array([[0]*x.shape[1]]*x.shape[0])
+        self.j = self.surf.parameterization.jacobian(self.pvars)
+        self.G = (self.j.transpose()*self.j)
+        self.G.simplify()
+        self.Ginv = self.G.inv()
+
+    def christoffel(self, k):
+        return sp.Matrix([[self.christoffel_ijk(0, 0, k), self.christoffel_ijk(0, 1, k)],
+                          [self.christoffel_ijk(1, 0, k), self.christoffel_ijk(1, 1, k)]])
+
+    def christoffel_ijk(self, i, j, k):
+        k = k - 1
+        sum = 0
+
+        for l in range(0, 2):
+            sum += self.Ginv[k, l] * (sp.diff(self.G[j, l], self.surf.pvars[i]) +
+                                      sp.diff(self.G[l, i], self.surf.pvars[j]) -
+                                      sp.diff(self.G[i, j], self.surf.pvars[l]))
+
+        return sum/2
+
+    def curve(self, l):
+        """Given a plane curve l, find the surface curve"""
+        return [self.f(*i) for i in l]
+
+    def y_pk(self, p, k, x):
+        k = k - 1
+
+        if p == 0 or p == N:
+            return x[p][k]
+
+        sum = 0
+        for e in it.product(range(0, 2), range(0, 2)):
+            i, j = e
+            ch = self.christoffel_ijk(i, j, k)
+            sum += ch.subs(zip(self.surf.pvars, x[p])) * \
+                   (x[p+1][i] - x[p-1][i]) * (x[p+1][j] - x[p-1][j])
+
+        sum = (x[p+1][k] + x[p-1][k])/2 + sum/4
 
     @on_trait_change('scene.activated')
     def update_plot(self):
+        x, y, z = self.f(self.plane.x, self.plane.y)[0]
+        self.scene.mlab.mesh(x, y, z, color=(0, 1, 0))
+
         self.scene.mlab.figure(self.figure2)
         self.scene.mlab.clf()
 
@@ -56,17 +102,20 @@ class Visualization(HasTraits):
 
         print point
 
-        if len(self.plane_points) >= 2:
+        if len(self.plane_points) >= 2 and added:
             start = self.plane_points[-2]
             x = [start[0], point[0]]
             y = [start[1], point[1]]
             z = [start[2], point[2]]
             self.scene.mlab.plot3d(x, y, z, tube_radius=0.01)
 
-        if added == True:
+        if added:
             self.scene.mlab.figure(self.figure)
-            self.scene.mlab.points3d(*self.surf.f(point[0], point[1])[0],
+            spoint = self.surf.f(point[0], point[1])[0]
+            self.surf_points.append(spoint)
+            self.scene.mlab.points3d(*spoint,
                                      scale_factor=0.1)
+            self.scene.mlab.figure(self.figure2)
 
 
 class Plane():
@@ -83,6 +132,7 @@ class Plane():
         return np.array([[self.z]*self.x.shape[1]]*self.x.shape[0])
 
     def in_plane(self, p):
+        """Checks if the point p is contained in the plane."""
         x, y, z = p
         if self.x0 <= x and x <= self.x1:
             if self.y0 <= y and y <= self.y1:
@@ -91,27 +141,53 @@ class Plane():
 
         return False
 
+    def line(self, p, q):
+        """Line from p to q, ie. p + t*(q-p)"""
+        t = np.linspace(0, 1, N)
+        p_ = np.array(p)
+        q_ = np.array(q)
+
+        return np.array([p + i*(q-p) for i in t])
+
 
 class Sphere(Visualization):
 
     def __init__(self, radius):
-        super(Sphere, self).__init__(self)
+
         self.plane = Plane(pi, 101j, 2 * pi, 101j)
         self.radius = radius
 
-        self.phi, self.theta = sp.symbols("phi theta")
-        self.sphere = sp.Matrix([[self.radius * sp.sin(self.phi) * sp.cos(self.theta),
-                                  self.radius * sp.sin(self.phi) * sp.sin(self.theta),
-                                  self.radius * sp.cos(self.phi)]])
-        self.f = sp.lambdify((self.phi, self.theta), self.sphere,
-                             [{'ImmutableMatrix': np.array}, "numpy"])
+        self.theta, self.phi = sp.symbols("theta phi")
+        self.pvars = sp.Matrix([self.theta, self.phi])
+        self.parameterization = sp.Matrix([[self.radius * sp.sin(self.phi) *
+                                            sp.cos(self.theta),
+                                            self.radius * sp.sin(self.phi) *
+                                            sp.sin(self.theta),
+                                            self.radius * sp.cos(self.phi)]])
 
-    @on_trait_change('scene.activated')
-    def update_plot(self):
-        x, y, z = self.f(self.plane.x, self.plane.y)[0]
-        self.scene.mlab.mesh(x, y, z, color=(0, 1, 0))
+        super(Sphere, self).__init__(self)
 
-        super(Sphere, self).update_plot()
+    # @on_trait_change('scene.activated')
+    # def update_plot(self):
+    #     super(Sphere, self).update_plot()
+
+
+class Torus(Visualization):
+
+    def __init__(self, R, r):
+
+        self.plane = Plane(2 * pi, 101j, 2 * pi, 101j)
+        self.r = r
+        self.R = R
+
+        self.theta, self.phi = sp.symbols("theta phi")
+        self.pvars = sp.Matrix([self.theta, self.phi])
+        self.parameterization = sp.Matrix(
+            [[(self.R + self.r*sp.cos(self.phi))*sp.cos(self.theta),
+              (self.R + self.r*sp.cos(self.phi))*sp.sin(self.theta),
+              self.r*sp.sin(self.phi)]])
+
+        super(Torus, self).__init__(self)
 
 
 class MayaviQWidget(QtGui.QWidget):
@@ -133,6 +209,7 @@ if __name__ == "__main__":
     container.setWindowTitle("Embedding Mayavi in a PyQt4 Application")
     layout = QtGui.QGridLayout(container)
     s = Sphere(1)
+#    s = Torus(3, 2)
     mayavi_widget = MayaviQWidget(s, container)
     layout.addWidget(mayavi_widget, 1, 1)
     label = QtGui.QLabel(container)
@@ -143,3 +220,6 @@ if __name__ == "__main__":
     window.setCentralWidget(container)
     window.show()
     app.exec_()
+else:
+    s = Sphere(1)
+    print s.christoffel(1)
